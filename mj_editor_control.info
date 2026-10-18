@@ -1,0 +1,8 @@
+name = MJ Editor Control
+description = Controls CKEditor visibility by role, field, content type and path, with BUEditor priority.
+backdrop = 1.x
+type = module
+package = MJH
+version = 1.x-1.0.0-MJH
+dependencies[] = filter
+configure = admin/config/content/mj-editor-control

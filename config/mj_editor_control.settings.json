@@ -1,0 +1,11 @@
+{
+  "_config_name": "mj_editor_control.settings",
+  "enabled": false,
+  "bueditor_roles": ["administrator"],
+  "user_one": true,
+  "ckeditor_roles": ["anonymous", "authenticated"],
+  "fields": "body\nfield_beschreibung",
+  "bundles": [],
+  "paths": "",
+  "path_mode": "include"
+}

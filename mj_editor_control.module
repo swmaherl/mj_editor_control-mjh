@@ -1,0 +1,167 @@
+<?php
+/**
+ * @file
+ * Selects editors without changing stored text formats or their permissions.
+ */
+
+/** Implements hook_config_info(). */
+function mj_editor_control_config_info() {
+  return array('mj_editor_control.settings' => array(
+    'label' => t('MJ Editor Control settings'), 'group' => t('Configuration'),
+  ));
+}
+
+/** Implements hook_permission(). */
+function mj_editor_control_permission() {
+  return array('administer mj editor control' => array(
+    'title' => t('Administer MJ Editor Control'), 'restrict access' => TRUE,
+  ));
+}
+
+/** Implements hook_menu(). */
+function mj_editor_control_menu() {
+  $items['admin/config/content/mj-editor-control'] = array(
+    'title' => 'MJ Editor Control',
+    'description' => t('Control editor visibility and BUEditor priority.'),
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('mj_editor_control_settings_form'),
+    'access arguments' => array('administer mj editor control'),
+    'file' => 'mj_editor_control.admin.inc',
+  );
+  return $items;
+}
+
+/** Implements hook_element_info_alter(). */
+function mj_editor_control_element_info_alter(&$types) {
+  // Run after filter_process_format() so that value and summary exist.
+  $types['text_format']['#process'][] = 'mj_editor_control_process_format';
+  // Keep element definitions independent of account/configuration caches.
+  // Decide at processing time whether BUEditor's own callback may run.
+  if (isset($types['textarea']['#process'])) {
+    foreach ($types['textarea']['#process'] as &$callback) {
+      if ($callback === 'bueditor_textarea') {
+        $callback = 'mj_editor_control_bueditor_textarea';
+      }
+    }
+  }
+}
+
+/** Gate BUEditor before it registers its textarea presets or loads assets. */
+function mj_editor_control_bueditor_textarea($element, &$form_state) {
+  $settings = config_get('mj_editor_control.settings');
+  if (empty($settings['enabled']) || mj_editor_control_bueditor_user($GLOBALS['user'], $settings)) {
+    if (function_exists('bueditor_textarea')) {
+      return bueditor_textarea($element, $form_state);
+    }
+  }
+  return $element;
+}
+/** Whether this account has BUEditor priority. */
+function mj_editor_control_bueditor_user($account, array $settings) {
+  return (!empty($settings['user_one']) && $account->uid == 1) ||
+    mj_editor_control_has_role($account, $settings['bueditor_roles']);
+}
+
+/** Check role IDs; authenticated users also match the authenticated role. */
+function mj_editor_control_has_role($account, array $roles) {
+  $account_roles = $account->roles;
+  $account_roles[] = empty($account->uid) ? BACKDROP_ANONYMOUS_ROLE : BACKDROP_AUTHENTICATED_ROLE;
+  return (bool) array_intersect($roles, $account_roles);
+}
+
+/** Match a newline-separated list of wildcard patterns. */
+function mj_editor_control_matches($value, $patterns) {
+  foreach (preg_split('/\r\n|\r|\n/', trim($patterns)) as $pattern) {
+    $pattern = trim($pattern);
+    if ($pattern !== '' && preg_match('/^' . str_replace('\\*', '.*', preg_quote($pattern, '/')) . '$/D', $value)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/** Evaluate field, bundle and path restrictions (all specified groups must match). */
+function mj_editor_control_selected(array $element, array $settings, $path, $alias) {
+  $names = array();
+  if (!empty($element['#field_name'])) {
+    $names[] = $element['#field_name'];
+  }
+  // Custom forms do not necessarily have Field API metadata.
+  if (!empty($element['#parents'])) {
+    $names[] = implode('][', $element['#parents']);
+    $names[] = reset($element['#parents']);
+  }
+  if (trim($settings['fields']) !== '') {
+    $matches = FALSE;
+    foreach ($names as $name) {
+      $matches = $matches || mj_editor_control_matches($name, $settings['fields']);
+    }
+    if (!$matches) {
+      return FALSE;
+    }
+  }
+  if (!empty($settings['bundles']) &&
+      (empty($element['#entity_type']) || $element['#entity_type'] !== 'node' ||
+       empty($element['#bundle']) || !in_array($element['#bundle'], $settings['bundles'], TRUE))) {
+    return FALSE;
+  }
+  if (trim($settings['paths']) !== '') {
+    $matches = backdrop_match_path($path, $settings['paths']) ||
+      ($alias !== $path && backdrop_match_path($alias, $settings['paths']));
+    if ($settings['path_mode'] === 'exclude' ? $matches : !$matches) {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+/** Recover the original form route when processing system/ajax. */
+function mj_editor_control_form_path(array $form) {
+  if (!empty($form['#action'])) {
+    $url = parse_url($form['#action']);
+    if (!empty($url['query'])) {
+      parse_str($url['query'], $query);
+      if (isset($query['q']) && is_string($query['q'])) {
+        return trim($query['q'], '/');
+      }
+    }
+    if (isset($url['path'])) {
+      $path = $url['path'];
+      $base = base_path();
+      if (strpos($path, $base) === 0) {
+        $path = substr($path, strlen($base));
+      }
+      return trim($path, '/');
+    }
+  }
+  return current_path();
+}
+
+/** Process a formatted field, retaining its format, filters and access checks. */
+function mj_editor_control_process_format($element, &$form_state, $form) {
+  $settings = config_get('mj_editor_control.settings');
+  if (empty($settings['enabled'])) {
+    return $element;
+  }
+  $mode = 'none';
+  if (mj_editor_control_bueditor_user($GLOBALS['user'], $settings)) {
+    $mode = 'bueditor';
+  }
+  elseif (mj_editor_control_has_role($GLOBALS['user'], $settings['ckeditor_roles'])) {
+    // Backdrop preserves #action when rebuilding a cached AJAX form.
+    $path = mj_editor_control_form_path($form);
+    if (mj_editor_control_selected($element, $settings, $path, backdrop_get_path_alias($path))) {
+      $mode = 'ckeditor';
+    }
+  }
+  foreach (array('value', 'summary') as $key) {
+    if (isset($element[$key]) && isset($element[$key]['#type']) && $element[$key]['#type'] === 'textarea') {
+      $element[$key]['#attributes']['data-mj-editor-mode'] = $mode;
+    }
+  }
+  $element['#attached']['js'][] = array(
+    'data' => backdrop_get_path('module', 'mj_editor_control') . '/js/mj_editor_control.js',
+    'type' => 'file', 'weight' => 100,
+  );
+  return $element;
+}
